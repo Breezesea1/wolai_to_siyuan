@@ -5,6 +5,7 @@ import unittest
 from pathlib import Path
 
 import main
+import sync_core
 
 
 class SyncNotesTests(unittest.TestCase):
@@ -118,6 +119,135 @@ image ![alt](../image/pic.png)
         self.assertEqual(client.hpath_calls, [("nb", "/迁移/wolai/DCC/Houdini/VFX/Axis/00-_Basic")])
         self.assertEqual(len(client.sql_calls), 1)
         self.assertIn("hpath = '/迁移/wolai/DCC/Houdini/VFX/Axis/00-_Basic'", client.sql_calls[0])
+
+    def test_desired_existing_cleanup_deletes_only_manifest_roots_at_notebook_root(self) -> None:
+        class FakeClient:
+            def __init__(self) -> None:
+                self.removed: list[str] = []
+
+            def sql(self, stmt: str) -> list[dict]:
+                return [
+                    {"id": "coding", "hpath": "/Coding"},
+                    {"id": "coding-child", "hpath": "/Coding/C"},
+                    {"id": "unrelated", "hpath": "/Private"},
+                    {"id": "os", "hpath": "/OS"},
+                    {"id": "probe", "hpath": "/__omx_probe__"},
+                ]
+
+            def remove_doc_by_id(self, notebook: str, doc_id: str) -> None:
+                self.removed.append(doc_id)
+
+        summary = main.SyncSummary()
+        client = FakeClient()
+        kept = main.safe_cleanup_existing_desired_docs(
+            client,
+            "nb",
+            "/",
+            summary,
+            desired_hpaths={"/Coding", "/Coding/C", "/OS"},
+            enabled=True,
+        )
+
+        self.assertEqual(kept, {})
+        self.assertEqual(client.removed, ["coding", "os"])
+        self.assertEqual(
+            summary.candidates_to_delete,
+            [{"doc_id": "coding", "hpath": "/Coding"}, {"doc_id": "os", "hpath": "/OS"}],
+        )
+
+    def test_extract_attribute_view_row_ids_prefers_rendered_rows(self) -> None:
+        self.assertEqual(
+            main.extract_attribute_view_row_ids({"view": {"rows": [{"id": "r1"}, {"id": "r2"}]}}),
+            ["r1", "r2"],
+        )
+        self.assertEqual(
+            main.extract_attribute_view_row_ids({"views": [{"table": {"rowIds": None}, "itemIds": ["i1", "i2"]}]}),
+            ["i1", "i2"],
+        )
+
+    def test_database_av_id_is_rebound_to_created_doc_root_id(self) -> None:
+        class FakeClient:
+            def __init__(self) -> None:
+                self.updated_markdown = ""
+                self.configured_av_id = ""
+
+            def list_notebooks(self) -> list[dict]:
+                return [{"id": "nb"}]
+
+            def create_doc_with_md(self, notebook: str, path: str, markdown: str) -> str:
+                return "created-root-id"
+
+            def update_block(self, block_id: str, markdown: str) -> None:
+                self.updated_markdown = markdown
+
+            def get_child_blocks(self, block_id: str) -> list[dict]:
+                return [{"id": "h1", "markdown": "# Probe"}, {"id": "p1", "markdown": "second"}]
+
+            def remove_doc_by_id(self, notebook: str, doc_id: str) -> None:
+                return None
+
+            def sql(self, stmt: str) -> list[dict]:
+                if "type = 'av'" in stmt:
+                    return [{"id": "av-block-id"}]
+                return []
+
+            def get_ids_by_hpath(self, notebook: str, path: str) -> list[str]:
+                return ["created-root-id"]
+
+            def upload_asset(self, path: Path, upload_name: str) -> dict[str, str]:
+                return {}
+
+            def render_attribute_view(self, av_id: str, block_id: str, create_if_not_exist: bool = True) -> dict:
+                self.configured_av_id = av_id
+                return {
+                    "view": {
+                        "columns": [
+                            {"id": "block-key"},
+                            {"id": "default-select"},
+                        ],
+                        "rows": [{"id": "row-1"}, {"id": "row-2"}],
+                    }
+                }
+
+            def add_attribute_view_key(
+                self, av_id: str, key_id: str, key_name: str, key_type: str, previous_key_id: str
+            ) -> None:
+                return None
+
+            def remove_attribute_view_key(self, av_id: str, key_id: str) -> None:
+                return None
+
+            def append_attribute_view_detached_blocks_with_values(self, av_id: str, blocks_values: list[list[dict]]) -> None:
+                return None
+
+            def set_attribute_view_block_attr(self, av_id: str, key_id: str, item_id: str, value: dict) -> None:
+                return None
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "pages").mkdir()
+            (root / "pages" / "Table_abcdefghijk123456.md").write_text(
+                "# Table\n\n| Name | State | Note |\n| --- | --- | --- |\n| Row | Done | A |\n| Row2 | Todo | B |\n",
+                encoding="utf-8",
+            )
+            client = FakeClient()
+            original_target_root = sync_core.TARGET_ROOT
+            try:
+                summary = main.sync_all(
+                    client=client,
+                    md_root=root,
+                    notebook_id="nb",
+                    target_root="/",
+                    dry_run=False,
+                    skip_cleanup=True,
+                )
+            finally:
+                sync_core.TARGET_ROOT = original_target_root
+
+        expected_av_id = main.stable_node_id("created-root-id#av")
+        self.assertIn(f'data-av-id="{expected_av_id}"', client.updated_markdown)
+        self.assertEqual(client.configured_av_id, expected_av_id)
+        self.assertFalse(summary.unsupported_features)
 
     def test_extract_structural_doc_links_ignores_table_links(self) -> None:
         markdown = """# CSPath
@@ -269,6 +399,70 @@ image ![alt](../image/pic.png)
         self.assertEqual(parents[base.source_rel], root.source_rel)
         self.assertEqual(parents[child_a.source_rel], base.source_rel)
         self.assertEqual(parents[child_b.source_rel], base.source_rel)
+
+    def test_extract_wolai_block_id_from_export_filename(self) -> None:
+        self.assertEqual(main.extract_wolai_block_id(Path("pages/Child_abcdefghijk123456.md")), "abcdefghijk123456")
+        self.assertIsNone(main.extract_wolai_block_id(Path("bzs.md")))
+
+    def test_extract_wolai_block_id_ignores_non_suffix_names(self) -> None:
+        self.assertIsNone(main.extract_wolai_block_id(Path("pages/Child.md")))
+
+    def test_build_wolai_api_parents_uses_block_relationships(self) -> None:
+        manifest = main.Manifest(
+            pages={
+                Path("bzs.md"): main.PageEntry(
+                    source_rel=Path("bzs.md"),
+                    abs_path=Path("bzs.md"),
+                    title="bzs",
+                    target_hpath="/迁移/wolai/bzs",
+                    markdown="# bzs\n\n* [library](pages/library_aaaaaaaaaaaaaaaa.md)\n",
+                ),
+                Path("pages/library_aaaaaaaaaaaaaaaa.md"): main.PageEntry(
+                    source_rel=Path("pages/library_aaaaaaaaaaaaaaaa.md"),
+                    abs_path=Path("pages/library_aaaaaaaaaaaaaaaa.md"),
+                    title="library",
+                    target_hpath="/迁移/wolai/library",
+                    markdown="# library\n\n[应用软件](应用软件_bbbbbbbbbbbbbbbb.md)\n",
+                ),
+                Path("pages/应用软件_bbbbbbbbbbbbbbbb.md"): main.PageEntry(
+                    source_rel=Path("pages/应用软件_bbbbbbbbbbbbbbbb.md"),
+                    abs_path=Path("pages/应用软件_bbbbbbbbbbbbbbbb.md"),
+                    title="应用软件",
+                    target_hpath="/迁移/wolai/应用软件",
+                    markdown="# 应用软件\n\n[Child](Child_cccccccccccccccc.md)\n",
+                ),
+                Path("pages/Child_cccccccccccccccc.md"): main.PageEntry(
+                    source_rel=Path("pages/Child_cccccccccccccccc.md"),
+                    abs_path=Path("pages/Child_cccccccccccccccc.md"),
+                    title="Child",
+                    target_hpath="/迁移/wolai/Child",
+                    markdown="# Child\n",
+                ),
+            }
+        )
+
+        class FakeWolaiClient:
+            def get_block(self, block_id: str) -> dict:
+                return {
+                    "data": {
+                        "id": block_id,
+                        "parent_id": {
+                            "aaaaaaaaaaaaaaaa": None,
+                            "bbbbbbbbbbbbbbbb": "aaaaaaaaaaaaaaaa",
+                            "cccccccccccccccc": "bbbbbbbbbbbbbbbb",
+                        }.get(block_id),
+                }
+                }
+
+            def get_block_children(self, block_id: str) -> list[dict]:
+                return {
+                    "aaaaaaaaaaaaaaaa": [{"id": "bbbbbbbbbbbbbbbb"}],
+                    "bbbbbbbbbbbbbbbb": [{"id": "cccccccccccccccc"}],
+                }.get(block_id, [])
+
+        parents = main.build_wolai_api_parents(FakeWolaiClient(), manifest)
+        self.assertEqual(parents[Path("pages/应用软件_bbbbbbbbbbbbbbbb.md")], Path("pages/library_aaaaaaaaaaaaaaaa.md"))
+        self.assertEqual(parents[Path("pages/Child_cccccccccccccccc.md")], Path("pages/应用软件_bbbbbbbbbbbbbbbb.md"))
 
     def test_navigation_hpaths_preserve_deep_page_tree_segments(self) -> None:
         root = main.PageEntry(
