@@ -38,16 +38,26 @@ pip install requests
 
 ### 2. 配置环境变量
 
-脚本支持通过环境变量覆盖默认配置：
+脚本支持通过环境变量覆盖默认配置。下面把代码里实际读取到的变量一次列全：
 
-| 变量名 | 说明 | 默认值 |
-| --- | --- | --- |
-| `SIYUAN_URL` | 思源 API 地址 | `http://127.0.0.1:6806` |
-| `SIYUAN_TOKEN` | 思源 API Token | 无，必填 |
-| `WOLAI_ROOT` | 待同步的本地 Markdown 根目录 | 当前目录 `.` |
-| `SIYUAN_TARGET_ROOT` | 导入到思源中的目标路径 | `/迁移/wolai` |
-| `SIYUAN_NOTEBOOK_ID` | 目标思源笔记本 ID | 无，必填 |
-| `SIYUAN_MAX_HPATH_SEGMENTS` | 目标路径层级截断配置，`0` 表示不截断 | `0` |
+| 变量名 | 作用 | 是否必需 | 默认值 / 说明 |
+| --- | --- | --- | --- |
+| `SIYUAN_URL` | 思源 API 地址 | 否 | `http://127.0.0.1:6806` |
+| `SIYUAN_TOKEN` | 思源 API Token | 是 | 空字符串；同步时必须提供 |
+| `WOLAI_ROOT` | 待同步的本地 Markdown 根目录 | 否 | 当前目录 `.` |
+| `SIYUAN_TARGET_ROOT` | 导入到思源中的目标路径 | 否 | `/迁移/wolai` |
+| `SIYUAN_NOTEBOOK_ID` | 目标思源笔记本 ID | 是 | 空字符串；同步时必须提供，也可用 `--notebook-id` 覆盖 |
+| `SIYUAN_MAX_HPATH_SEGMENTS` | 目标路径层级截断配置，`0` 表示不截断 | 否 | `0` |
+| `WOLAI_API_BASE` | wolai API 基础地址 | 否 | `https://openapi.wolai.com` |
+| `WOLAI_TOKEN` | wolai API 访问令牌 | 条件必需 | 如果提供了它，就会优先用它访问 wolai API |
+| `WOLAI_APP_ID` | wolai App ID | 条件必需 | 与 `WOLAI_APP_KEY` 配对使用，二选一地替代 `WOLAI_TOKEN` |
+| `WOLAI_APP_KEY` | wolai App Secret | 条件必需 | 与 `WOLAI_APP_ID` 配对使用，二选一地替代 `WOLAI_TOKEN` |
+
+说明：
+
+- `SIYUAN_TOKEN` 和 `SIYUAN_NOTEBOOK_ID` 是执行同步时的硬性必填项。
+- `WOLAI_TOKEN` 与 `WOLAI_APP_ID`/`WOLAI_APP_KEY` 是可选的；只有在需要基于 wolai API 做父级关系发现时才会用到。
+- 如果不打算使用 wolai API 相关能力，可以不配置任何 `WOLAI_*` 变量。
 
 PowerShell 示例：
 
